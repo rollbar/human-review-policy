@@ -1,0 +1,57 @@
+name: Human review policy
+# Reports the `human-review-policy` commit status: 1 human approval besides the
+# author for a human-authored PR, 2 for a bot-authored one, and labels PRs
+# merged past it needs-post-merge-review. Logic and the exact counting rules
+# are in human_review_policy.py.
+#
+# Call it from a `workflow_run` workflow, never straight from pull_request /
+# pull_request_review: those run the workflow file from the PR itself, so a PR
+# could edit the policy it is being judged by. A workflow_run workflow always
+# runs from the default branch. See README.md.
+
+on:
+  workflow_call:
+    inputs:
+      human-approvals:
+        description: Human approvals besides the author required on a human-authored PR
+        required: false
+        type: number
+        default: 1
+      bot-approvals:
+        description: Human approvals required on a bot-authored PR
+        required: false
+        type: number
+        default: 2
+      service-accounts:
+        description: Extra machine-user logins to treat as bots (comma or newline separated)
+        required: false
+        type: string
+        default: ""
+      post-merge-label:
+        description: Label for PRs merged without meeting the policy (empty disables)
+        required: false
+        type: string
+        default: needs-post-merge-review
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # write: label and comment on PRs merged past the check.
+      pull-requests: write
+      statuses: write
+    # Each run re-reads the PR, so the last one to finish is always right; queue
+    # runs per head SHA so an older read can never land after a newer one.
+    concurrency:
+      group: human-review-policy-${{ github.repository }}-${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha || github.run_id }}
+      cancel-in-progress: false
+    steps:
+      - name: Evaluate and report human-review-policy
+        uses: rollbar/human-review-policy@main
+        with:
+          token: ${{ github.token }}
+          human-approvals: ${{ inputs.human-approvals }}
+          bot-approvals: ${{ inputs.bot-approvals }}
+          service-accounts: ${{ inputs.service-accounts }}
+          post-merge-label: ${{ inputs.post-merge-label }}
