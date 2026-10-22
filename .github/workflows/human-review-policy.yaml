@@ -41,13 +41,17 @@ jobs:
       # write: label and comment on PRs merged past the check.
       pull-requests: write
       statuses: write
-    # Each run re-reads the PR, so the last one to finish is always right; queue
-    # runs per head SHA so an older read can never land after a newer one.
+    # Each run re-reads the PR and posts on its current head, so runs for one PR
+    # must not overlap. Queue them per PR head branch (not head SHA, which
+    # changes with every push); GitHub keeps only the newest pending run, which
+    # is the one that reads the latest state.
     concurrency:
-      group: human-review-policy-${{ github.repository }}-${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha || github.run_id }}
+      group: human-review-policy-${{ github.repository }}-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch || github.event.pull_request.number || github.run_id }}
       cancel-in-progress: false
     steps:
       - name: Evaluate and report human-review-policy
+        # Always main, whatever ref this workflow was called at: `uses:` cannot
+        # take an expression.
         uses: rollbar/human-review-policy@main
         with:
           token: ${{ github.token }}

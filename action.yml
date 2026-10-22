@@ -7,8 +7,9 @@ description: >
 inputs:
   token:
     description: >
-      Token used to read the PR and its reviews, write the status and label
-      merged PRs. Needs pull-requests:write and statuses:write.
+      Token used to read the PR, its reviews and its reviewers' repository
+      permissions, write the status and label merged PRs. Needs
+      pull-requests:write and statuses:write.
     required: true
   pr-number:
     description: >

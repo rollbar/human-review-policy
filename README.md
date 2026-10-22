@@ -30,7 +30,8 @@ changes, or a dismissal) is an approval, by someone who is **not**:
 |---|---|
 | The PR author | login match |
 | Bots | GitHub `type: Bot` / `<name>[bot]` — every GitHub App (`devtools-agent[bot]`, `dependabot[bot]`, `chatgpt-codex-connector[bot]`, …) |
-| Service accounts | machine users are `type: User`, so they are listed: `rollbar-circleci-machine` built in, plus the `service-accounts` input |
+| Service accounts | machine users are `type: User`, so they are listed: `rollbar-circleci-machine`, `web-flow` and `ghost` built in, plus the `service-accounts` input |
+| People without write access | the repository permission API reports less than `write`. Any GitHub account can approve a PR on a public repository, and so can an org member with read access on a private one |
 
 A PR whose author is a bot, a listed service account or a deleted account is
 "bot-authored". "Comment" reviews never add or remove an approval. Someone who
@@ -113,6 +114,10 @@ blocked (fail closed).
 `workflow_run` only fires once `human-review-policy.yaml` is on the default branch,
 so the check starts reporting after the PR adding it is merged.
 
+The reusable workflow always runs the action from this repository's `main`,
+whatever ref the caller pins it to (`uses:` cannot take an expression), so
+pinning `@<sha>` above does not pin the evaluator.
+
 ## 2. Require the check with a ruleset
 
 Only after step 1 is merged and the status shows up on PRs, otherwise every open
@@ -140,11 +145,13 @@ default branch and:
 
 ### Post-merge review after a bypass
 
-When a PR is merged without meeting the policy (an admin bypass, or any merge
-before the ruleset is in place), the workflow labels it
+When a PR is merged into the default branch without meeting the policy (an
+admin bypass, or any merge before the ruleset is in place), the workflow labels it
 **`needs-post-merge-review`** and comments how many more human approvals it
 needs. Approving a merged PR still works (*Files changed* → *Review changes*);
 once the approvals meet the policy, the label is removed with a closing comment.
+PRs merged into other branches (stacked PRs, release branches) are outside the
+ruleset and are not tracked.
 Everything still owed across the org:
 
 ```

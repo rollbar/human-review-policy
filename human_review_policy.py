@@ -11,7 +11,9 @@ and a reviewer, or two reviewers when the author is a bot.
 
 Who counts as an approver: the reviewer's latest decisive review
 (APPROVED / CHANGES_REQUESTED / DISMISSED; a COMMENTED review changes nothing,
-as on GitHub) is APPROVED, and the reviewer is neither
+as on GitHub) is APPROVED, the reviewer has write access to the repository
+(on a public repository anyone can submit an approving review), and the
+reviewer is neither
 
   - the PR author, nor
   - a bot (GitHub `type: Bot`, i.e. any GitHub App) or a listed service account
@@ -34,7 +36,8 @@ Post-merge tracking: admins may merge past the check in an incident, and such
 a PR then needs its review after the fact. A PR that is merged without meeting
 the policy gets the POST_MERGE_LABEL label (default needs-post-merge-review)
 and a comment; the label comes off, with another comment, once later reviews
-on the merged PR meet the policy.
+on the merged PR meet the policy. Only PRs merged into the default branch,
+the one the ruleset protects, are tracked.
 
 Standard library only: the runner's system python, no install step.
 """
@@ -49,6 +52,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 API = os.environ.get("GITHUB_API_URL", "https://api.github.com")
@@ -62,6 +66,8 @@ MERGE_GROUP_BRANCH = re.compile(r"gh-readonly-queue/.+/pr-(\d+)-[0-9a-f]{40}$")
 RETRY_DELAYS = (2, 5, 10)
 NEXT_LINK = re.compile(r'<([^>]+)>;\s*rel="next"')
 MAX_DESCRIPTION = 140
+# Repository permissions (collaborators/{user}/permission) that may approve.
+WRITE_PERMISSIONS = {"admin", "maintain", "write"}
 
 
 @dataclass
@@ -89,7 +95,10 @@ def is_automated(user: dict | None, policy: Policy) -> bool:
     return user.get("type") == "Bot" or login.endswith("[bot]") or login in policy.service_accounts
 
 
-def evaluate(pr: dict, reviews: list[dict], policy: Policy) -> Result:
+def evaluate(
+    pr: dict, reviews: list[dict], policy: Policy, can_write: Callable[[str], bool]
+) -> Result:
+    """can_write(login): whether that reviewer has write access to the repository."""
     author = pr.get("user")
     author_login = ((author or {}).get("login") or "").lower()
     author_is_bot = is_automated(author, policy)
@@ -114,6 +123,8 @@ def evaluate(pr: dict, reviews: list[dict], policy: Policy) -> Result:
             ignored[login] = "PR author"
         elif is_automated(reviewers[login], policy):
             ignored[login] = "bot or service account"
+        elif not can_write(login):
+            ignored[login] = "no write access"
         else:
             approvers.append(login)
 
@@ -170,6 +181,22 @@ def get_all(url: str, token: str) -> list:
         match = NEXT_LINK.search(link)
         url = match.group(1) if match else ""
     return items
+
+
+def write_access(repo: str, token: str) -> Callable[[str], bool]:
+    """can_write for evaluate(), backed by the repository permissions API."""
+
+    def can_write(login: str) -> bool:
+        quoted = urllib.parse.quote(login, safe="")
+        try:
+            perm, _ = request("GET", f"/repos/{repo}/collaborators/{quoted}/permission", token)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:  # not a user (any more)
+                return False
+            raise
+        return (perm or {}).get("permission") in WRITE_PERMISSIONS
+
+    return can_write
 
 
 def merge_group_pr(ref: str) -> int | None:
@@ -245,6 +272,12 @@ def track_post_merge(repo: str, token: str, pr: dict, result: Result, label: str
     flagged = label in {lbl["name"] for lbl in pr.get("labels") or []}
     kind = "bot" if result.author_is_bot else "human"
     have, required = len(result.approvers), result.required
+    base = pr.get("base") or {}
+    if base.get("ref") != (base.get("repo") or {}).get("default_branch"):
+        # The ruleset only protects the default branch; merges elsewhere (stacked
+        # PRs, release branches) never needed the policy.
+        print(f"PR #{number} was merged into {base.get('ref')}, not the default branch")
+        return
     if result.state != "success" and not flagged:
         request("POST", f"/repos/{repo}/issues/{number}/labels", token, {"labels": [label]})
         body = (
@@ -302,18 +335,26 @@ def main() -> int:
             status["target_url"] = target_url
         request("POST", f"/repos/{repo}/statuses/{sha}", token, status)
 
-    number, group_sha = resolve_target(
-        repo, token, event_name, event, os.environ.get("PR_NUMBER", "")
-    )
-    if number is None:
-        print("No pull request for this event; nothing to evaluate.")
-        return 0
+    def evaluate_pr(pr: dict) -> Result:
+        reviews = get_all(f"/repos/{repo}/pulls/{pr['number']}/reviews", token)
+        return evaluate(pr, reviews, policy_from_env(), write_access(repo, token))
 
     # Where the status goes if this run fails before it knows better: the
     # commit that triggered it. Never leave an earlier success standing when an
-    # evaluation could not finish, e.g. after an approval was dismissed.
-    fallback_sha = group_sha or (event.get("workflow_run") or {}).get("head_sha")
+    # evaluation could not finish, e.g. after an approval was dismissed; that
+    # includes failing to find the PR, which takes API calls for fork PRs.
+    fallback_sha = (
+        (event.get("merge_group") or {}).get("head_sha")
+        or (event.get("workflow_run") or {}).get("head_sha")
+        or ((event.get("pull_request") or {}).get("head") or {}).get("sha")
+    )
     try:
+        number, group_sha = resolve_target(
+            repo, token, event_name, event, os.environ.get("PR_NUMBER", "")
+        )
+        if number is None:
+            print("No pull request for this event; nothing to evaluate.")
+            return 0
         # Always re-read the PR: the triggering event may be stale by now, and the
         # status has to land on the head SHA that would actually be merged.
         pr, _ = request("GET", f"/repos/{repo}/pulls/{number}", token)
@@ -322,16 +363,12 @@ def main() -> int:
             if not pr.get("merged_at") or not post_merge_label or group_sha:
                 print(f"PR #{number} is closed; nothing to evaluate.")
                 return 0
-            result = evaluate(
-                pr, get_all(f"/repos/{repo}/pulls/{number}/reviews", token), policy_from_env()
-            )
+            result = evaluate_pr(pr)
             print(f"PR #{number} (merged): {result.state} - {result.description}")
             write_summary(pr, result)
             track_post_merge(repo, token, pr, result, post_merge_label)
             return 0
-        result = evaluate(
-            pr, get_all(f"/repos/{repo}/pulls/{number}/reviews", token), policy_from_env()
-        )
+        result = evaluate_pr(pr)
     except Exception:
         if fallback_sha:
             post_status(
