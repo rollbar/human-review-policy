@@ -1,0 +1,62 @@
+name: Human review policy
+description: >
+  Count independent human approvals on a pull request and report the
+  `human-review-policy` commit status on its head SHA: 1 approval for a
+  human-authored PR, 2 for a bot-authored one. See
+  README.md for how to wire it up.
+inputs:
+  token:
+    description: >
+      Token used to read the PR, its reviews and its reviewers' repository
+      permissions, write the status and label merged PRs. Needs
+      pull-requests:write and statuses:write.
+    required: true
+  pr-number:
+    description: >
+      PR to evaluate. Empty (default) resolves it from the event:
+      pull_request*, or the PR whose head is a workflow_run's SHA.
+    required: false
+    default: ""
+  human-approvals:
+    description: Independent human approvals required on a human-authored PR.
+    required: false
+    default: "1"
+  bot-approvals:
+    description: Independent human approvals required on a bot-authored PR.
+    required: false
+    default: "2"
+  service-accounts:
+    description: >
+      Extra machine-user logins (comma or newline separated) to treat as bots,
+      on top of the built-in list in human_review_policy.py. GitHub Apps
+      (`<name>[bot]`) never need listing.
+    required: false
+    default: ""
+  post-merge-label:
+    description: >
+      Label put (with a comment) on a PR merged without meeting the policy,
+      i.e. through an admin bypass, and removed once later reviews meet it.
+      Empty disables post-merge tracking.
+    required: false
+    default: needs-post-merge-review
+  status-context:
+    description: >
+      Status context to write. The ruleset's required check must use the
+      same name.
+    required: false
+    default: human-review-policy
+runs:
+  using: composite
+  steps:
+    - name: Evaluate and report human-review-policy
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        PR_NUMBER: ${{ inputs.pr-number }}
+        HUMAN_APPROVALS: ${{ inputs.human-approvals }}
+        BOT_APPROVALS: ${{ inputs.bot-approvals }}
+        SERVICE_ACCOUNTS: ${{ inputs.service-accounts }}
+        STATUS_CONTEXT: ${{ inputs.status-context }}
+        POST_MERGE_LABEL: ${{ inputs.post-merge-label }}
+        TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: python3 "${GITHUB_ACTION_PATH}/human_review_policy.py"
